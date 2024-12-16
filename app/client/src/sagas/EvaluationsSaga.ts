@@ -6,6 +6,7 @@ import {
   delay,
   fork,
   put,
+  race,
   select,
   spawn,
   take,
@@ -16,6 +17,7 @@ import type {
   ReduxAction,
   ReduxActionType,
   AnyReduxAction,
+  BufferedReduxAction,
 } from "ee/constants/ReduxActionConstants";
 import { ReduxActionTypes } from "ee/constants/ReduxActionConstants";
 import {
@@ -754,22 +756,67 @@ function* evaluationChangeListenerSaga(): any {
     evalQueueBuffer(),
   );
 
+  let hasDeferredAction = false;
+
   while (true) {
-    const action: EvaluationReduxAction<unknown | unknown[]> =
-      yield take(evtActionChannel);
+    const { action, timeout } = yield race({
+      action: take(evtActionChannel),
+      timeout: delay(2000),
+    });
+
+    if (!action && !hasDeferredAction) continue;
 
     // We are dequing actions from the buffer and inferring the JS actions affected by each
     // action. Through this we know ahead the nodes we need to specifically diff, thereby improving performance.
     const affectedJSObjects = getAffectedJSObjectIdsFromAction(action);
 
-    yield call(evalAndLintingHandler, true, action, {
-      shouldReplay: get(action, "payload.shouldReplay"),
-      forceEvaluation: shouldForceEval(action),
-      requiresLogging: shouldLog(action),
-      affectedJSObjects,
-    });
+    if (shouldDeferAction(action)) {
+      hasDeferredAction = true;
+    } else if (timeout) {
+      hasDeferredAction = false;
+      const action = {
+        payload: { affectedJSObjects: { ids: [], isAllAffected: false } },
+        type: ReduxActionTypes.BUFFERED_ACTION,
+      };
+
+      yield call(evalAndLintingHandler, true, action, {
+        shouldReplay: get(action, "payload.shouldReplay"),
+        forceEvaluation: shouldForceEval(action),
+        requiresLogging: shouldLog(action),
+        affectedJSObjects,
+      });
+    } else {
+      hasDeferredAction = false;
+      yield call(evalAndLintingHandler, true, action, {
+        shouldReplay: get(action, "payload.shouldReplay"),
+        forceEvaluation: shouldForceEval(action),
+        requiresLogging: shouldLog(action),
+        affectedJSObjects,
+      });
+    }
   }
 }
+
+const shouldDeferAction = (
+  action: ReduxAction<unknown> | BufferedReduxAction<unknown>,
+) => {
+  const affectedJSObjects = getAffectedJSObjectIdsFromAction(action);
+  const { ids, isAllAffected } = affectedJSObjects;
+  // eslint-disable-next-line @typescript-eslint/no-explicit-any
+  const { postEvalActions, type } = action as any;
+
+  if (
+    !ids.length &&
+    !isAllAffected &&
+    type === ReduxActionTypes.BUFFERED_ACTION &&
+    !postEvalActions.length
+  )
+    return true;
+
+  if (type === ReduxActionTypes.TRIGGER_EVAL) return true;
+
+  return false;
+};
 
 // TODO: Fix this the next time the file is edited
 // eslint-disable-next-line @typescript-eslint/no-explicit-any
