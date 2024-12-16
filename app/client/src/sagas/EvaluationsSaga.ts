@@ -772,10 +772,10 @@ function* evaluationChangeListenerSaga(): any {
 
     if (shouldDeferAction(action)) {
       hasDeferredAction = true;
-    } else if (timeout) {
+    } else if (timeout && hasDeferredAction) {
       hasDeferredAction = false;
       const action = {
-        payload: { affectedJSObjects: { ids: [], isAllAffected: false } },
+        payload: { affectedJSObjects: { ids: [], isAllAffected: true } },
         type: ReduxActionTypes.BUFFERED_ACTION,
       };
 
